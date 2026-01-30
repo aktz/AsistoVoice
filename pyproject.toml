@@ -1,0 +1,30 @@
+[project]
+name = "asistovoice"
+version = "0.1.0"
+description = ""
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    { name = "Flet developer", email = "you@example.com" }
+]
+dependencies = [
+    "flet>=0.80.4",
+    "sounddevice>=0.4.6",
+    "soundfile>=0.12.1",
+]
+
+[dependency-groups]
+dev = [
+    "flet-cli>=0.80.4",
+    "flet-desktop>=0.80.4",
+    "flet-web>=0.80.4",
+]
+
+[tool.flet]
+org = "com.mycompany"
+product = "asistovoice"
+company = "Flet"
+copyright = "Copyright (C) 2023-2026 by Flet"
+
+[tool.flet.app]
+path = "src"

@@ -1,0 +1,14 @@
+---
+alwaysApply: true
+---
+la aplicación gestiona salidas validando asistentes, que pueden ir en un grupo o individualmente, a un evento, que tiene uno o varios destinos. 
+Existen categorías de eventos, y en cada evento se debe registrar la asistencia, y si cada asistente ha pagado o no.
+También en cada evento se pueden vender productos, y cada producto tiene uno o más proveedores.
+Se maneja autenticación y autorización a través de usuarios y roles.
+La base de datos es relacional y se utiliza SQLite. El archivo se llama asisto.db y está en la ruta src/asisto.db.
+El proyecto está creado en Flet.
+Se debe utilizar estructuras con clases y módulos, cuando sea posible. 
+Se deben utilizar en lo posible modulos existentes ya en python, para aprovechar funcionalidades ya existentes.
+No se deben generar scripts de pruebas en base de datos, ni archivos readme de ninguna clase.
+El objetivo primario de ejecución es aplicación mobile.
+El frontend estará basado exclusivamente en el admin template ubicado en la ruta C:\Users\maomujica\Downloads\OneUI 5.10
