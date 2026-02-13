@@ -1,103 +1,128 @@
 """
-Grabación de audio desde el micrófono y guardado en carpeta audios.
+Grabadora de audio: guarda WAV en whispercpp/audios para transcripción con WhisperCpp.
+Usa InputStream con callback para captura continua y fiable del micrófono.
 """
-from __future__ import annotations
-
-import os
 import threading
-from datetime import datetime
+import wave
 from pathlib import Path
 
-import numpy as np
-import sounddevice as sd
-import soundfile as sf
+# Ruta base del paquete src
+_SRC_DIR = Path(__file__).resolve().parent.parent
+WHISPERCPP_AUDIOS = _SRC_DIR / "whispercpp" / "audios"
+ARCHIVO_GRABACION = "grabacion.wav"
+
+# Tamaño de bloque para el callback (muestras). ~64 ms a 16 kHz.
+BLOCKSIZE = 1024
 
 
 class Grabadora:
-    """
-    Graba audio del micrófono hasta que se llame a detener.
-    Guarda el archivo en la carpeta indicada (por defecto audios).
-    """
+    """Graba audio desde el micrófono. Iniciar con iniciar_grabacion(), detener con detener_grabacion()."""
 
-    SAMPLERATE = 44100
-    CHANNELS = 1
-    SUBTYPE = "PCM_16"
+    def __init__(self, sample_rate: int = 16000, canales: int = 1):
+        self.sample_rate = sample_rate
+        self.canales = canales
+        self._stream = None
+        self._chunks = []
+        self._lock = threading.Lock()
 
-    def __init__(self, carpeta: str | Path | None = None):
-        """
-        carpeta: ruta donde guardar los archivos. Si es None, se usa 'audios'
-                 relativo al directorio de trabajo o al directorio del script.
-        """
-        if carpeta is None:
-            carpeta = Path(__file__).resolve().parent.parent / "audios"
-        self._carpeta = Path(carpeta)
-        self._chunks: list[np.ndarray] = []
-        self._stop_requested = False
-        self._thread: threading.Thread | None = None
-        self._last_path: str | None = None
-        self._error: str | None = None
+    def _asegurar_carpeta(self) -> Path:
+        WHISPERCPP_AUDIOS.mkdir(parents=True, exist_ok=True)
+        return WHISPERCPP_AUDIOS
 
-    def _ensure_carpeta(self) -> None:
-        self._carpeta.mkdir(parents=True, exist_ok=True)
+    def ruta_wav(self) -> Path:
+        """Ruta completa del archivo WAV de grabación."""
+        self._asegurar_carpeta()
+        return WHISPERCPP_AUDIOS / ARCHIVO_GRABACION
 
-    def _generar_ruta(self) -> Path:
-        self._ensure_carpeta()
-        nombre = datetime.now().strftime("grabacion_%Y%m%d_%H%M%S.wav")
-        return self._carpeta / nombre
+    @property
+    def grabando(self) -> bool:
+        return self._stream is not None and self._stream.active
 
-    def _worker(self) -> None:
-        self._chunks.clear()
-        self._error = None
-        path = self._generar_ruta()
+    def iniciar_grabacion(self) -> None:
+        """Inicia la grabación con InputStream (callback). Llamar detener_grabacion() para guardar."""
+        try:
+            import sounddevice as sd
+            import numpy as np
+        except ImportError:
+            raise ImportError(
+                "Se necesita 'sounddevice' y 'numpy' para grabar. "
+                "Instale con: pip install sounddevice numpy"
+            )
 
-        def callback(indata: np.ndarray, frames: int, time: object, status: sd.CallbackFlags) -> None:
+        if self.grabando:
+            return
+
+        self._asegurar_carpeta()
+        with self._lock:
+            self._chunks = []
+
+        def _callback(indata, _frames, _time, status):
             if status:
-                self._error = str(status)
-            self._chunks.append(indata.copy())
+                return
+            with self._lock:
+                self._chunks.append(indata.copy())
 
         try:
-            with sd.InputStream(
-                samplerate=self.SAMPLERATE,
-                channels=self.CHANNELS,
-                callback=callback,
-                dtype=np.int16,
-            ):
-                while not self._stop_requested:
-                    sd.sleep(100)
-            if self._chunks:
-                data = np.concatenate(self._chunks, axis=0)
-                sf.write(path, data, self.SAMPLERATE, subtype=self.SUBTYPE)
-                self._last_path = str(path)
-            else:
-                self._last_path = None
-                self._error = "No se grabó audio."
-        except Exception as e:
-            self._error = str(e)
-            self._last_path = None
+            self._stream = sd.InputStream(
+                samplerate=self.sample_rate,
+                channels=self.canales,
+                dtype="float32",
+                blocksize=BLOCKSIZE,
+                callback=_callback,
+            )
+            self._stream.start()
+        except Exception:
+            self._stream = None
+            raise
 
-    def iniciar(self) -> None:
-        """Inicia la grabación en un hilo. No bloquea."""
-        if self._thread is not None and self._thread.is_alive():
-            return
-        self._stop_requested = False
-        self._last_path = None
-        self._thread = threading.Thread(target=self._worker, daemon=True)
-        self._thread.start()
-
-    def detener(self) -> tuple[str | None, str | None]:
+    def detener_grabacion(self) -> Path | None:
         """
-        Pide detener la grabación, espera al hilo y guarda el archivo.
-        Retorna (ruta_del_archivo, mensaje_error).
-        Si todo fue bien: (ruta, None). Si hubo error: (None, mensaje).
+        Detiene la grabación, guarda en whispercpp/audios/grabacion.wav y retorna la ruta.
+        Retorna None si no había grabación o no hay datos.
         """
-        self._stop_requested = True
-        if self._thread is not None:
-            self._thread.join(timeout=5.0)
-            self._thread = None
-        if self._error:
-            return None, self._error
-        return self._last_path, None
+        stream = self._stream
+        self._stream = None
+        if stream is not None:
+            try:
+                stream.stop()
+                stream.close()
+            except Exception:
+                pass
 
-    def esta_grabando(self) -> bool:
-        """True si la grabación está en curso."""
-        return self._thread is not None and self._thread.is_alive()
+        with self._lock:
+            chunks = list(self._chunks)
+            self._chunks = []
+
+        if not chunks:
+            return None
+
+        try:
+            import numpy as np
+        except ImportError:
+            return None
+
+        # indata tiene shape (blocksize, canales)
+        grabacion = np.concatenate(chunks, axis=0)
+        datos_int16 = (np.clip(grabacion, -1.0, 1.0) * 32767).astype(np.int16)
+        if self.canales > 1:
+            datos_int16 = datos_int16.flatten()
+
+        ruta = self.ruta_wav()
+        with wave.open(str(ruta), "wb") as wav:
+            wav.setnchannels(self.canales)
+            wav.setsampwidth(2)
+            wav.setframerate(self.sample_rate)
+            wav.writeframes(datos_int16.tobytes())
+
+        return ruta
+
+    def grabar_bloque(self, duracion_segundos: float) -> Path:
+        """
+        Graba un bloque de duración fija (compatibilidad). Retorna la ruta del archivo.
+        """
+        import time
+        self.iniciar_grabacion()
+        try:
+            time.sleep(duracion_segundos)
+        finally:
+            return self.detener_grabacion() or self.ruta_wav()

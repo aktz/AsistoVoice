@@ -1,19 +1,29 @@
 """
 Parser de texto entrante: extrae acción, entidad y parámetros.
+Se quitan tildes del texto (á->a, ñ->n, etc.) para que el reconocimiento funcione igual.
 """
 from __future__ import annotations
 
+import unicodedata
 from typing import Any
 
 from .modelo import Accion, Entidad, Instruccion
 
 
-# Palabras que indican cada acción (minúsculas)
+def _quitar_tildes(s: str) -> str:
+    """Reemplaza vocales con tilde por la vocal sin tilde y ñ por n."""
+    if not s:
+        return ""
+    nfd = unicodedata.normalize("NFD", s)
+    return "".join(c for c in nfd if unicodedata.category(c) != "Mn")
+
+
+# Palabras que indican cada acción (minúsculas, sin tildes)
 _ACCIONES_CREAR = {
-    "nueva", "nuevo", "crear", "insertar", "agregar", "añadir", "alta", "registrar",
+    "nueva", "nuevo", "crear", "insertar", "agregar", "anadir", "alta", "registrar",
 }
 _ACCIONES_LISTAR = {
-    "listar", "ver", "mostrar", "todas", "todos",
+    "listado", "listar", "mostrar", "ver", "todas", "todos",
 }
 _ACCIONES_ACTUALIZAR = {
     "editar", "actualizar", "modificar", "cambiar", "actualiza", "modifica",
@@ -22,23 +32,35 @@ _ACCIONES_ELIMINAR = {
     "eliminar", "borrar", "quitar", "elimina", "borra",
 }
 
-# Entidades (singular y plural) -> Entidad
+# Entidades (sin tildes; el texto ya viene sin tildes)
 _ENTIDADES: dict[str, Entidad] = {
     "categoria": Entidad.CATEGORIAS,
     "categorias": Entidad.CATEGORIAS,
-    "categoría": Entidad.CATEGORIAS,
-    "categorías": Entidad.CATEGORIAS,
 }
 
-# Nombres de campo reconocidos al actualizar (permite valores multi-palabra hasta el siguiente campo)
+# Nombres de campo reconocidos al actualizar
 _CAMPOS_ACTUALIZABLES = {"descripcion"}
+_CAMPO_DESCRIPCION = "descripcion"
 
 # Palabras a ignorar entre acción/entidad y datos
 _STOPWORDS = {"la", "las", "los", "el", "de", "a", "en", "con", "todas", "todos"}
 
 
-def _normalizar(s: str) -> str:
-    return " ".join(s.split()).strip()
+# Signos de cierre de frase: se quitan al final para que "nueva categoria X." sea válido
+_FIN_FRASE = ".!?"
+
+
+def _normalizar(s: str | bytes) -> str:
+    """Normaliza espacios y quita punto (u otro cierre) al final. Acepta str o bytes."""
+    if s is None:
+        return ""
+    if isinstance(s, bytes):
+        s = s.decode("utf-8", errors="replace")
+    s = str(s).strip()
+    if not s:
+        return ""
+    t = " ".join(s.split()).strip()
+    return t.rstrip(_FIN_FRASE).strip()
 
 
 def _primera_palabra_accion(palabras: list[str], low: list[str]) -> tuple[Accion | None, int]:
@@ -48,7 +70,7 @@ def _primera_palabra_accion(palabras: list[str], low: list[str]) -> tuple[Accion
     """
     if not palabras:
         return None, 0
-    w = low[0]
+    w = low[0].lower()
     if w in _ACCIONES_CREAR:
         return Accion.CREAR, 1
     if w in _ACCIONES_LISTAR:
@@ -57,8 +79,7 @@ def _primera_palabra_accion(palabras: list[str], low: list[str]) -> tuple[Accion
         return Accion.ACTUALIZAR, 1
     if w in _ACCIONES_ELIMINAR:
         return Accion.ELIMINAR, 1
-    # "Ver todas las categorias" -> listar
-    if len(low) >= 2 and w == "ver" and low[1] in ("todas", "todos"):
+    if len(low) >= 2 and w == "ver" and low[1].lower() in ("todas", "todos"):
         return Accion.LISTAR, 2
     return None, 0
 
@@ -70,11 +91,12 @@ def _buscar_entidad(palabras: list[str], low: list[str], desde: int) -> tuple[En
     """
     i = desde
     while i < len(low):
-        if low[i] in _STOPWORDS:
+        w = low[i].lower()
+        if w in _STOPWORDS:
             i += 1
             continue
-        if low[i] in _ENTIDADES:
-            return _ENTIDADES[low[i]], i + 1
+        if w in _ENTIDADES:
+            return _ENTIDADES[w], i + 1
         return None, desde
     return None, desde
 
@@ -103,44 +125,42 @@ def _extraer_params(
         # "actualizar evento 2 descripcion evento2 visible falso" -> id=2, descripcion="evento2", visible=False
         # id obligatorio, luego pares campo valor (valor hasta el siguiente campo conocido o fin)
         idx = 0
-        while idx < len(rest_low) and rest_low[idx] in _STOPWORDS:
+        while idx < len(rest_low) and rest_low[idx].lower() in _STOPWORDS:
             idx += 1
         if idx < len(rest) and rest[idx].isdigit():
             params["id"] = int(rest[idx])
             idx += 1
         while idx < len(rest_low):
-            while idx < len(rest_low) and rest_low[idx] in _STOPWORDS:
+            while idx < len(rest_low) and rest_low[idx].lower() in _STOPWORDS:
                 idx += 1
             if idx >= len(rest_low):
                 break
-            if rest_low[idx] not in _CAMPOS_ACTUALIZABLES:
+            if rest_low[idx].lower() not in _CAMPOS_ACTUALIZABLES:
                 idx += 1
                 continue
-            campo = rest_low[idx]
             idx += 1
-            # Valor: tokens hasta el siguiente campo conocido o fin
             valor_tokens: list[str] = []
             while idx < len(rest_low):
-                if rest_low[idx] in _CAMPOS_ACTUALIZABLES:
+                if rest_low[idx].lower() in _CAMPOS_ACTUALIZABLES:
                     break
-                if rest_low[idx] not in _STOPWORDS:
+                if rest_low[idx].lower() not in _STOPWORDS:
                     valor_tokens.append(rest[idx])
                 idx += 1
             valor_str = " ".join(valor_tokens).strip()
             if not valor_str:
                 continue
-            # Normalizar booleanos
+            # Normalizar booleanos; guardar siempre con clave "descripcion" para la BD
             v_low = valor_str.lower()
             if v_low in ("verdadero", "true", "1", "si", "sí", "yes"):
-                params[campo] = True
+                params[_CAMPO_DESCRIPCION] = True
             elif v_low in ("falso", "false", "0", "no"):
-                params[campo] = False
+                params[_CAMPO_DESCRIPCION] = False
             else:
-                params[campo] = valor_str
+                params[_CAMPO_DESCRIPCION] = valor_str
 
     elif accion == Accion.ELIMINAR:
         idx = 0
-        while idx < len(rest_low) and rest_low[idx] in _STOPWORDS:
+        while idx < len(rest_low) and rest_low[idx].lower() in _STOPWORDS:
             idx += 1
         if idx < len(rest) and rest[idx].isdigit():
             params["id"] = int(rest[idx])
@@ -154,11 +174,14 @@ class ParserInstrucciones:
     Ej.: "Nueva categoria Espectaculos" -> CREAR categorias, descripcion="Espectaculos".
     """
 
-    def parsear(self, texto: str) -> Instruccion | None:
+    def parsear(self, texto: str | bytes) -> Instruccion | None:
         """
         Parsea el texto y retorna una Instruccion o None si no se reconoce.
+        Se quitan tildes (á->a, ñ->n) del texto antes de reconocer.
+        Acepta str o bytes (se decodifica como UTF-8).
         """
         t = _normalizar(texto)
+        t = _quitar_tildes(t)
         if not t:
             return None
         palabras = t.split()

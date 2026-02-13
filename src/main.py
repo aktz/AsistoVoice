@@ -1,15 +1,17 @@
+import unicodedata
+
 import flet as ft
 from datetime import datetime
-from pathlib import Path
 from typing import List
 
 from audio import Grabadora
 from procesamiento import EjecutorInstrucciones, ParserInstrucciones
+from whispercpp import transcribir
 
 
 class ChatMessage:
     """Clase para representar un mensaje del chat"""
-    
+
     def __init__(self, content: str, is_user: bool = True):
         self.content = content
         self.is_user = is_user
@@ -18,7 +20,7 @@ class ChatMessage:
 
 class ChatView:
     """Vista principal del chat tipo ChatGPT"""
-    
+
     def __init__(self, page: ft.Page):
         self.page = page
         self.messages: List[ChatMessage] = []
@@ -29,72 +31,81 @@ class ChatView:
             auto_scroll=True,
         )
         self.text_input = ft.TextField(
-            label="Escribe tu mensaje...",
+            label="Texto (voz o escrito)",
             multiline=True,
-            min_lines=1,
-            max_lines=5,
+            min_lines=2,
+            max_lines=2,
             expand=True,
             on_submit=self._send_message,
         )
-        # Usar emoji de micrófono - más seguro que depender de nombres de iconos
-        self.audio_icon_text = ft.Text("🎤", size=24)
-        self.audio_button = ft.Container(
-            content=self.audio_icon_text,
-            tooltip="Grabar audio",
-            on_click=self._handle_audio_click,
-            padding=8,
-            border_radius=20,
-            ink=True,
+        self.send_button = ft.IconButton(
+            icon=ft.Icons.SEND,
+            tooltip="Enviar",
+            on_click=self._send_message,
         )
         self._parser = ParserInstrucciones()
         self._ejecutor = EjecutorInstrucciones()
-        self._grabadora = Grabadora(carpeta=Path(__file__).resolve().parent / "audios")
-        # Usar emoji de envío - más seguro que depender de nombres de iconos
-        self.send_button = ft.Container(
-            content=ft.Text("➤", size=24, color=ft.Colors.BLUE_400),
-            tooltip="Enviar mensaje",
-            on_click=self._send_message,
-            padding=8,
-            border_radius=20,
-            ink=True,
+        self._grabadora = Grabadora()
+        # Un solo botón: micrófono para iniciar, stop para parar (luego guarda y transcribe)
+        self.mic_btn = ft.IconButton(
+            icon=ft.Icons.MIC,
+            tooltip="Grabar",
+            on_click=self._on_mic_click,
         )
-        self._is_recording = False
-        
+
+    async def _rellenar_texto(self, texto: str):
+        """Pone el texto en el control de entrada (para reutilizar desde el historial)."""
+        self.text_input.value = texto or ""
+        await self.text_input.focus()
+        self.page.update()
+
+    def _click_historial(self, content: str):
+        """Devuelve el handler async para el clic en un mensaje del usuario."""
+        async def _handler(e):
+            await self._rellenar_texto(content)
+        return _handler
+
     def _build_message_row(self, message: ChatMessage) -> ft.Row:
-        """Construye una fila de mensaje"""
-        alignment = ft.MainAxisAlignment.END if message.is_user else ft.MainAxisAlignment.START
+        """Construye una fila de mensaje. Los mensajes del usuario son clicables para rellenar el texto."""
+        alignment = (
+            ft.MainAxisAlignment.END if message.is_user else ft.MainAxisAlignment.START
+        )
         bg_color = ft.Colors.BLUE_700 if message.is_user else ft.Colors.GREY_800
         text_color = ft.Colors.WHITE
-        
-        return ft.Row(
-            [
-                ft.Container(
-                    content=ft.Column(
-                        [
-                            ft.Text(
-                                message.content,
-                                color=text_color,
-                                size=14,
-                                selectable=True,
-                            ),
-                            ft.Text(
-                                message.timestamp.strftime("%H:%M"),
-                                color=ft.Colors.GREY_400,
-                                size=10,
-                            ),
-                        ],
-                        tight=True,
-                        spacing=4,
+
+        content = ft.Container(
+            content=ft.Column(
+                [
+                    ft.Text(
+                        message.content,
+                        color=text_color,
+                        size=14,
+                        selectable=True,
                     ),
-                    padding=12,
-                    border_radius=12,
-                    bgcolor=bg_color,
-                    width=300,
-                )
-            ],
+                    ft.Text(
+                        message.timestamp.strftime("%H:%M"),
+                        color=ft.Colors.GREY_400,
+                        size=10,
+                    ),
+                ],
+                tight=True,
+                spacing=4,
+            ),
+            padding=12,
+            border_radius=12,
+            bgcolor=bg_color,
+            width=300,
+        )
+        if message.is_user:
+            content.on_click = self._click_historial(message.content)
+            content.tooltip = "Tocar para usar este texto"
+            content.ink = True
+
+        return ft.Row(
+            [content],
             alignment=alignment,
         )
-    
+
     def _add_message(self, content: str, is_user: bool = True):
         """Añade un mensaje al chat (los más recientes abajo, estilo ChatGPT)."""
         message = ChatMessage(content, is_user)
@@ -102,9 +113,68 @@ class ChatView:
         self.chat_container.controls.append(self._build_message_row(message))
         self.page.update()
 
+    def _on_mic_click(self, e):
+        """Un clic: si no graba → inicia y cambia a Stop. Si graba → para, guarda y transcribe."""
+        if not self._grabadora.grabando:
+            # Iniciar grabación y mostrar ícono Stop
+            try:
+                self._grabadora.iniciar_grabacion()
+            except Exception as err:
+                self.page.snack_bar = ft.SnackBar(
+                    content=ft.Text(f"Error al iniciar: {err}"),
+                    open=True,
+                    bgcolor=ft.Colors.ERROR,
+                )
+                self.page.update()
+                return
+            self.mic_btn.icon = ft.Icons.STOP
+            self.mic_btn.tooltip = "Detener grabación"
+            self.page.update()
+        else:
+            # Detener: guardar y transcribir en hilo
+            self.mic_btn.icon = ft.Icons.MIC
+            self.mic_btn.tooltip = "Grabar"
+            self.mic_btn.disabled = True
+            self.page.update()
+
+            def _guardar_y_transcribir():
+                ok = False
+                texto = ""
+                error = None
+                try:
+                    ruta = self._grabadora.detener_grabacion()
+                    if ruta and ruta.exists():
+                        texto = transcribir()
+                        ok = True
+                    else:
+                        error = "No se grabó audio."
+                except Exception as err:
+                    error = str(err)
+                # Programar actualización en el hilo principal (obligatorio en Flet)
+                def _aplicar_en_ui():
+                    self.mic_btn.disabled = False
+                    if ok:
+                        t = (texto or "").strip()
+                        self.text_input.value = unicodedata.normalize("NFC", t)
+                        self.text_input.update()
+                        self.page.snack_bar = ft.SnackBar(
+                            content=ft.Text("Transcripción completada"),
+                            open=True,
+                        )
+                    else:
+                        self.page.snack_bar = ft.SnackBar(
+                            content=ft.Text(f"Error: {error}"),
+                            open=True,
+                            bgcolor=ft.Colors.ERROR,
+                        )
+                    self.page.update()
+                self.page.loop.call_soon_threadsafe(_aplicar_en_ui)
+
+            self.page.run_thread(_guardar_y_transcribir)
+
     async def _send_message(self, e):
-        """Envía el mensaje desde el campo de texto"""
-        texto = self.text_input.value.strip()
+        """Procesar: toma el texto del control, lo envía al historial y ejecuta con la BD."""
+        texto = (self.text_input.value or "").strip()
         if not texto:
             return
         self._add_message(texto, is_user=True)
@@ -119,8 +189,8 @@ class ChatView:
         if inst is None:
             self._add_message(
                 "No entendí. Ejemplos:\n"
-                "• Nueva categoria Espectaculos\n"
-                "• Listar categorias\n"
+                "• Nueva categoria descripcion Espectaculos activa si\n"
+                "• Listado categorias\n"
                 "• Editar categoria 1 Descripcion Conciertos\n"
                 "• Eliminar categoria 3",
                 is_user=False,
@@ -129,53 +199,27 @@ class ChatView:
             msg = self._ejecutor.ejecutar(inst)
             self._add_message(msg, is_user=False)
         self.page.update()
-    
-    def _handle_audio_click(self, e):
-        """Maneja el clic en el botón de audio: iniciar o detener grabación y guardar en audios."""
-        if not self._is_recording:
-            self._is_recording = True
-            self.audio_icon_text.value = "⏹"
-            self.audio_button.tooltip = "Detener grabación"
-            self.audio_button.bgcolor = ft.Colors.RED_700
-            self._grabadora.iniciar()
-            self.page.update()
-        else:
-            self._is_recording = False
-            self.audio_icon_text.value = "🎤"
-            self.audio_button.tooltip = "Grabar audio"
-            self.audio_button.bgcolor = None
-            self.page.update()
-            ruta, error = self._grabadora.detener()
-            if error:
-                self._add_message(f"Error al grabar: {error}", is_user=False)
-            elif ruta:
-                nombre = Path(ruta).name
-                self._add_message(f"Audio guardado en audios: {nombre}", is_user=False)
-            else:
-                self._add_message("No se guardó ningún audio.", is_user=False)
-            self.page.update()
-    
+
     def build(self) -> ft.Container:
         """Construye la vista completa del chat"""
         return ft.Container(
             content=ft.Column(
                 [
-                    # Área de mensajes
                     ft.Container(
                         content=self.chat_container,
                         expand=True,
                         padding=10,
                     ),
-                    # Área de entrada
                     ft.Container(
                         content=ft.Row(
                             [
-                                self.audio_button,
+                                self.mic_btn,
                                 self.text_input,
                                 self.send_button,
                             ],
-                            spacing=5,
-                            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                            spacing=8,
+                            alignment=ft.MainAxisAlignment.START,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
                         ),
                         padding=10,
                         bgcolor=ft.Colors.GREY_900,
@@ -192,18 +236,10 @@ def main(page: ft.Page):
     """Función principal de la aplicación"""
     page.title = "AsistoVoice"
     page.theme_mode = ft.ThemeMode.DARK
-    
-    # Configurar para mobile
     page.padding = 0
-    
+
     chat_view = ChatView(page)
-    
-    page.add(
-        ft.SafeArea(
-            expand=True,
-            content=chat_view.build(),
-        )
-    )
+    page.add(ft.SafeArea(expand=True, content=chat_view.build()))
 
 
 if __name__ == "__main__":

@@ -9,8 +9,8 @@ authors = [
 ]
 dependencies = [
     "flet>=0.80.4",
-    "sounddevice>=0.4.6",
-    "soundfile>=0.12.1",
+    "numpy",
+    "sounddevice",
 ]
 
 [dependency-groups]

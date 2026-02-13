@@ -1,12 +1,23 @@
 """
 Servicio CRUD para la tabla categorías en asisto.db.
+Se quitan tildes del texto (á->a, ñ->n) antes de guardar.
 """
 from __future__ import annotations
 
 import sqlite3
+import unicodedata
 from typing import Any
 
 from .db import get_connection
+
+
+def _quitar_tildes(s: str) -> str:
+    """Reemplaza vocales con tilde por vocal sin tilde y ñ por n."""
+    if not s:
+        return ""
+    t = (s or "").strip()
+    nfd = unicodedata.normalize("NFD", t)
+    return "".join(c for c in nfd if unicodedata.category(c) != "Mn")
 
 
 def _row_a_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -30,7 +41,7 @@ class CategoriasService:
         with get_connection() as conn:
             cur = conn.execute(
                 f"INSERT INTO {self._TABLA} (descripcion) VALUES (?)",
-                (descripcion.strip(),),
+                (_quitar_tildes(descripcion),),
             )
             return cur.lastrowid
 
@@ -70,7 +81,7 @@ class CategoriasService:
                 if isinstance(v, bool):
                     valores.append(1 if v else 0)
                 elif isinstance(v, str):
-                    valores.append(v.strip())
+                    valores.append(_quitar_tildes(v))
                 else:
                     valores.append(v)
             cur = conn.execute(

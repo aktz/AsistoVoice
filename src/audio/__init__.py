@@ -1,5 +1,5 @@
 """
-Módulo de grabación de audio desde el micrófono.
+Paquete audio: grabación y rutas para WhisperCpp.
 """
 from .grabadora import Grabadora
 
